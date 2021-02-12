@@ -4,19 +4,25 @@
 
 package io.ktor.network.sockets.tests
 
+import io.ktor.network.mock.*
 import io.ktor.network.selector.*
 import io.ktor.network.sockets.*
 import io.ktor.network.sockets.Socket
+import io.ktor.network.sockets.SocketImpl
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.debug.junit4.*
 import org.junit.*
 import org.junit.rules.*
-import java.net.InetSocketAddress
+import sun.nio.ch.*
+import java.net.*
 import java.net.ServerSocket
 import java.nio.*
+import java.nio.channels.*
+import java.nio.channels.spi.*
 import java.util.concurrent.*
 import kotlin.concurrent.*
+import kotlin.coroutines.*
 import kotlin.test.*
 import kotlin.test.Test
 
@@ -94,46 +100,34 @@ class ClientSocketTest {
 
     @Test
     fun testSelfConnect() {
-        runBlocking {
-            // Find a port that would be used as a local address.
-            val port = getAvailablePort()
+        val channel = object : SocketChannelMock() {
+            override fun socket(): java.net.Socket {
+                return SocketMock(
+                    localAddress = InetSocketAddress("client", 1),
+                    remoteAddress = InetSocketAddress("client", 1),
+                    sourceChannel = this
+                )
+            }
 
-            val tcpSocketBuilder = aSocket(ActorSelectorManager(Dispatchers.IO)).tcp()
-            // Try to connect to that address repeatedly.
-            for (i in 0 until 100000) {
-                try {
-                    val socket = tcpSocketBuilder.connect(InetSocketAddress("127.0.0.1", port))
-                    fail("connect to self succeed: ${socket.localAddress} to ${socket.remoteAddress}")
-                } catch (ex: Exception) {
-                    // ignore
-                }
+            override fun connect(remote: SocketAddress?): Boolean {
+                return false
+            }
+
+            override fun finishConnect(): Boolean {
+                if (!isOpen) throw ClosedChannelException()
+                return true
             }
         }
-    }
 
-    // since new linux kernel version introduce a feature, new bind port number will always be odd number
-    // and connect port will always be even, so we find a random even port with while loop
-    // see https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=07f4c90062f8fc7c8c26f8f95324cbe8fa3145a5
-    private fun getAvailablePort(): Int {
-        while (true) {
-            val port = ServerSocket().apply {
-                bind(InetSocketAddress("127.0.0.1", 0))
-                close()
-            }.localPort
+        channel.configureBlocking(false)
 
-            if (port % 2 == 0) {
-                return port
-            }
-
-            try {
-                // try bind the next even port
-                ServerSocket().apply {
-                    bind(InetSocketAddress("127.0.0.1", port + 1))
-                    close()
-                }
-                return port + 1
-            } catch (ex: Exception) {
-                // ignore
+        runBlocking {
+            assertFailsWith<ClosedChannelException>(
+                "Channel should be closed if local and remote addresses of client socket match"
+            ) {
+                SocketImpl(channel, channel.socket(), SelectorManagerMock()).connect(
+                    InetSocketAddress("server", 2)
+                )
             }
         }
     }
